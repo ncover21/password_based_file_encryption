@@ -132,3 +132,4 @@ dmypy.json
 # Added 
 test.py
 notes.md
+*.txt

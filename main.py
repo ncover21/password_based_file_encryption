@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 import base64, json
 import os, getpass, logging
 from cryptography.fernet import Fernet
@@ -5,26 +7,14 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding
 
 logging.basicConfig(level=logging.DEBUG)
 
 SALT_LENGTH = 32
 N_ITERATIONS = 1000000
-F_CHECK = "TPASS".encode() #Len: 5
-BLOCK_SIZE = 16
-
-
-pad = lambda s: s + (BLOCK_SIZE - len(s) % BLOCK_SIZE) * chr(BLOCK_SIZE - len(s) % BLOCK_SIZE)
-unpad = lambda s: s[:-ord(s[len(s) - 1:])]
-
-def get_storage_file():
-	home = os.path.expanduser('~')
-	return os.path.join(home, ".tpass")
-
-def delete_pass_file():
-	filename = get_storage_file()
-	if os.path.exists(filename):
-		os.remove(filename)
+F_CHECK = "pbfe1".encode() #Len: 5
+BLOCK_SIZE = 128
 
 def create_keys(hashed_pass, salt):
 	aes_key = os.urandom(32)
@@ -56,16 +46,21 @@ def decrypt_aes_key(hash_check, salt, enc_key, iv):
 		)
 	if( hashed_pass[32:] != hash_check):
 		print("Incorrect Password...")
-		quit()
-		# NOTE: Fails if you retry password 
-		#decrypt_aes_key(hash_check, salt, enc_key, iv)
+		return decrypt_aes_key(hash_check, salt, enc_key, iv)
 
 	cipher = Cipher(algorithms.AES(hashed_pass[:32]), modes.CBC(iv), backend=default_backend())
 	decryptor = cipher.decryptor()
 	return decryptor.update(enc_key) + decryptor.finalize()
 
-def setup_db():
+def setup():
 	password = getpass.getpass('Enter a password:').encode()
+
+	#Non-Hashed Based Password Verifier
+	password_check = getpass.getpass('Re-Enter password:').encode()
+	if(password != password_check):
+		print("Passwords don't match, try again")
+		return setup()
+
 	salt = os.urandom(SALT_LENGTH)
 	kdf1 = PBKDF2HMAC(
 			algorithm=hashes.SHA256(),
@@ -75,6 +70,8 @@ def setup_db():
 			backend=default_backend()
 		)
 	key_orig = kdf1.derive(password)
+	'''
+	#Hash Based Password Verifier
 	kdf2 = PBKDF2HMAC(
 			algorithm=hashes.SHA256(),
 			length=64,
@@ -87,8 +84,8 @@ def setup_db():
 		kdf2.verify(password_check, key_orig)
 	except:
 		print("Passwords don't match")
-		initialize_db()
-	
+		return initialize_db()
+	'''
 	print("Password Saved, Creating Keys...")
 
 	return create_keys(key_orig, salt)
@@ -97,7 +94,8 @@ def setup_db():
 	# Return length of 88 for:
 	# base64.urlsafe_b64encode(key_orig+salt)
 
-def decrypt_database(s_hash, data):
+
+def depreciated_decrypt_file(s_hash, data):
 	password = getpass.getpass('Password:').encode()
 	kdf1 = PBKDF2HMAC(
 			algorithm=hashes.SHA256(),
@@ -115,17 +113,12 @@ def decrypt_database(s_hash, data):
 		return decrypted_db
 	except:
 		print("Wrong password...")
-		decrypt_database(data)
+		decrypt_file(data)
 
-def initialize_db(db_file):
-	with open(db_file, 'wb+') as file:
-		file.write(F_CHECK)
-
-def db_startup():
-	db_file = get_storage_file()
-	if(os.path.exists(db_file)):
+def startup(filename):
+	if(os.path.exists(filename)):
 		data = None
-		with open(db_file, 'rb') as f:
+		with open(filename, 'rb') as f:
 			data = f.read()
 		if(len(data) > 0):
 			validate_db = data[:5]
@@ -133,65 +126,80 @@ def db_startup():
 			content = data[117:]
 
 			if(validate_db != F_CHECK):
-				print("Not Valid Password File")
-				response = input("Do You Want to Initialize a New Password File (y/n)")
-				if(response == 'y'):
-					initialize_db(db_file)
-					return (b'', b'')
-				else:
-					print("Bye...")
-					exit()
+				print("File Not encrypted with script")
+				exit()
 			else:
 				return (headers, content)
-		else:
-			initialize_db(db_file)
-			return (b'', b'')
-	else:
-		initialize_db(db_file)
-		return (b'', b'')
+	return (b'', b'')
 
-def decrypt_store(key, iv, ct):
+def decrypt_file(key, iv, ct, filename):
+
 	cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
 	decryptor = cipher.decryptor()
-	return json.loads(unpad(decryptor.update(ct) + decryptor.finalize()).decode())
+	pt = decryptor.update(ct) + decryptor.finalize()
 
-def encrpyt_and_save(key, iv, header, pt):
+	unpadder = padding.PKCS7(BLOCK_SIZE).unpadder()
+	pt = unpadder.update(pt) + unpadder.finalize()
+
+	with open(filename, 'wb') as file:
+		file.write(pt)
+
+
+def encrypt_and_save(key, iv, header, filename):
+	with open(filename, 'rb') as f:
+		pt = f.read()
+
 	cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
 	encryptor = cipher.encryptor()
-	enc_data = encryptor.update(pad(pt).encode()) + encryptor.finalize()
-	with open(get_storage_file(), 'wb') as file:
+	#enc_data = encryptor.update(pad(pt).encode()) + encryptor.finalize()
+
+	padder = padding.PKCS7(BLOCK_SIZE).padder()
+	padded_data = padder.update(pt) + padder.finalize()
+	enc_data = encryptor.update(padded_data) + encryptor.finalize()
+
+	with open(filename, 'wb') as file:
 		file.write(F_CHECK)
 		file.write(header)
 		file.write(enc_data)
 	logging.debug("Saved Password File...")
 
 def main():
+
+	#Command Line Arg Setup
+	import argparse
+	parser = argparse.ArgumentParser(description="Password File Encryptor")
+	parser.add_argument("-f", "--file",action="store", help="File to encrypt or decrypt")
+	parser.add_argument("-e", "--encrypt", action="store_true",
+							help="Specify to encrypt file")
+	parser.add_argument("-d", "--decrypt", action="store_true",
+							help="Specify to decrypt file")
+	args = parser.parse_args()
 	aes_key = None
 	password_dict = {}
 
-	file_header, enc_content  = db_startup()
-	if(file_header != b'' and enc_content != b''):
-		logging.debug("file_header_size: {}, len(ec): {}".format(len(file_header), len(enc_content)))
-		logging.debug("Found Valid DB")
+	if args.file != None:
+		if not os.path.exists(args.file):
+			logging.error("Error: File does not exist...")
+			exit()
 
-		#file header length = 112
-		salt = file_header[:32] #32
-		auth_check = file_header[32:64] #32
-		enc_aes = file_header[64:96] #32
-		iv = file_header[96:] #16
+		if args.encrypt:
+			aes_key, file_header = setup()
+			encrypt_and_save(aes_key, file_header[96:], file_header, args.file)
+			print("File Successfully Encrypted")
+		elif args.decrypt:
+			file_header, enc_content  = startup(args.file)
 
-		aes_key = decrypt_aes_key(auth_check, salt, enc_aes, iv)
-		password_dict = decrypt_store(aes_key, iv, enc_content)
-		print("Successfuly loaded passwords")
-		
-	else:
-		logging.debug("No Data in DB... Setting up a new one")
-		aes_key, file_header = setup_db()
-		encrpyt_and_save(aes_key, file_header[96:], file_header, json.dumps(password_dict))
-		print("Password Storage Set Up and Secure")
+			salt = file_header[:32] #32
+			auth_check = file_header[32:64] #32
+			enc_aes = file_header[64:96] #32
+			iv = file_header[96:] #16
 
-	#Everything beyond this point should be loaded correctly
+			aes_key = decrypt_aes_key(auth_check, salt, enc_aes, iv)
+			password_dict = decrypt_file(aes_key, iv, enc_content, args.file)
 
+			print("Filed Successfully Decrypted")
+		else:
+			print("Action not specified, specify -e (encryption) or -d (decryption)")
 
 
 
